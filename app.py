@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,6 @@ CUSTOM_CSS = """
 footer {visibility: hidden;}
 .title-row {display:flex; align-items:center; gap:.5rem; flex-wrap: wrap;}
 .badge {background:#E10600; color:#fff; padding:.25rem .6rem; border-radius:999px; font-weight:700;}
-.muted {color:#6B7280;}
 .kpi-card {padding:.75rem 1rem; border:1px solid #e5e7eb; border-radius:.75rem; background:#fff;}
 .kpi-value {font-size:1.6rem; font-weight:700;}
 .kpi-label {color:#6B7280; font-size:.85rem;}
@@ -54,98 +53,107 @@ DEFAULT_URL = (
     "dados-brutos-de-producao-hemoterapica-1/hemoprod_nacional.csv"
 )
 
-# -------------- LINKS POR ESTADO (com fallback seguro) --------------
-# onde eu lembrar do endereço oficial, uso direto; demais ganham um link de busca "Doe sangue <UF>"
 BUSCA = "https://www.google.com/search?q=doe+sangue+{}"
-
 LINKS_UF: Dict[str, str] = {
     "AC": "https://www.hemoacre.ac.gov.br/",
     "AL": "http://www.hemoal.al.gov.br/",
-    "AP": "https://www.portal.ap.gov.br/profissionais/saude/hemocentro-do-amapa",  # ou busca
+    "AP": "https://www.portal.ap.gov.br/profissionais/saude/hemocentro-do-amapa",
     "AM": "https://www.hemoam.am.gov.br/",
     "BA": "http://www.hemoba.ba.gov.br/",
     "CE": "https://www.hemoce.ce.gov.br/",
-    "DF": "https://www.fhb.df.gov.br/",  # Fundação Hemocentro de Brasília
+    "DF": "https://www.fhb.df.gov.br/",
     "ES": "https://hemoes.es.gov.br/",
-    "GO": "https://www.hemocentro.org.br/",  # HEMOGO
+    "GO": "https://www.hemocentro.org.br/",
     "MA": "https://www.hemomar.ma.gov.br/",
-    "MT": "https://www.saude.mt.gov.br/hemocentro",  # Hemocentro MT
+    "MT": "https://www.saude.mt.gov.br/hemocentro",
     "MS": "http://www.hemosul.ms.gov.br/",
     "MG": "https://www.hemominas.mg.gov.br/",
     "PA": "https://www.hemopa.pa.gov.br/",
-    "PB": "https://paraiba.pb.gov.br/diretas/saude/hemocentro",  # Hemocentro PB
+    "PB": "https://paraiba.pb.gov.br/diretas/saude/hemocentro",
     "PR": "https://www.saude.pr.gov.br/HEMEPAR",
     "PE": "http://www.hemope.pe.gov.br/",
     "PI": "https://www.saude.pi.gov.br/hemopi",
     "RJ": "https://www.hemorio.rj.gov.br/",
     "RN": "http://www.hemonorte.rn.gov.br/",
-    "RS": "https://saude.rs.gov.br/hemocentro",  # Hemorgs/Hemocentro RS
+    "RS": "https://saude.rs.gov.br/hemocentro",
     "RO": "http://www.rondonia.ro.gov.br/organograma/secretaria-de-estado-da-saude/fhemeron/",
-    "RR": "https://www.rr.gov.br/servico/hemoraima",  # Hemoraima
+    "RR": "https://www.rr.gov.br/servico/hemoraima",
     "SC": "https://www.hemosc.org.br/",
     "SP": "https://www.prosangue.sp.gov.br/",
     "SE": "https://www.saude.se.gov.br/hemose/",
-    "TO": "https://www.to.gov.br/saude/hemorrede/1077",  # Hemorrede Tocantins (Hemoto)
+    "TO": "https://www.to.gov.br/saude/hemorrede/1077",
 }
-# garante fallback
 for uf in UF_VALIDAS:
-    if uf not in LINKS_UF or not LINKS_UF[uf]:
-        LINKS_UF[uf] = BUSCA.format(uf)
+    LINKS_UF.setdefault(uf, BUSCA.format(uf))
 
 # =========================
 # FUNÇÕES AUXILIARES
 # =========================
+def to_numeric(series: pd.Series) -> pd.Series:
+    # troca vírgula decimal por ponto antes de converter
+    s = series.astype(str).str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce")
+
 @st.cache_data(show_spinner=False)
-def fetch_csv(url: str) -> pd.DataFrame:
-    return pd.read_csv(url, sep=",", encoding="utf-8", low_memory=False)
+def fetch_csv_robusto(url: str) -> Tuple[pd.DataFrame, str, str]:
+    """
+    Tenta várias combinações (sep/encoding) para ler CSV 'problemáticos' da ANVISA.
+    Retorna (df, sep_usado, encoding_usado).
+    """
+    tentativas = [
+        (None, "utf-8"), (None, "latin1"),
+        (";", "utf-8"), (";", "latin1"),
+        (",", "utf-8"), (",", "latin1"),
+        ("\t", "utf-8"), ("\t", "latin1"),
+    ]
+    erros = []
+    for sep, enc in tentativas:
+        try:
+            df = pd.read_csv(
+                url,
+                sep=sep,
+                encoding=enc,
+                engine="python",           # mais tolerante
+                on_bad_lines="skip",        # ignora linhas ruins
+                low_memory=False,
+            )
+            if df.shape[1] == 1 and df.columns.size == 1:
+                # pode ter lido tudo em uma coluna — tenta novamente com outro sep
+                raise ValueError("Leitura degenerada (1 coluna).")
+            return df, str(sep), enc
+        except Exception as e:
+            erros.append(f"[sep={sep} enc={enc}] {e}")
+    raise RuntimeError("Falha ao ler CSV. Tentativas:\n" + "\n".join(erros))
 
 def normaliza_uf(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.upper()
     mapa = {
-        "SAO PAULO": "SP", "SÃO PAULO": "SP",
-        "RIO DE JANEIRO": "RJ",
-        "MINAS GERAIS": "MG",
-        "ESPIRITO SANTO": "ES", "ESPÍRITO SANTO": "ES",
-        "PARANA": "PR", "PARANÁ": "PR",
-        "RIO GRANDE DO SUL": "RS",
-        "SANTA CATARINA": "SC",
-        "DISTRITO FEDERAL": "DF",
-        "GOIAS": "GO", "GOIÁS": "GO",
-        "BAHIA": "BA", "PERNAMBUCO": "PE", "CEARA": "CE", "CEARÁ": "CE",
-        "RIO GRANDE DO NORTE": "RN", "PARAIBA": "PB", "PARAÍBA": "PB",
-        "PIAUI": "PI", "PIAUÍ": "PI",
-        "MARANHAO": "MA", "MARANHÃO": "MA",
-        "ALAGOAS": "AL", "SERGIPE": "SE",
-        "PARA": "PA", "PARÁ": "PA",
-        "AMAPA": "AP", "AMAPÁ": "AP",
-        "AMAZONAS": "AM", "ACRE": "AC",
-        "RONDONIA": "RO", "RONDÔNIA": "RO",
-        "RORAIMA": "RR",
-        "MATO GROSSO DO SUL": "MS",
-        "MATO GROSSO": "MT",
-        "TOCANTINS": "TO",
+        "SAO PAULO": "SP", "SÃO PAULO": "SP", "RIO DE JANEIRO": "RJ", "MINAS GERAIS": "MG",
+        "ESPIRITO SANTO": "ES", "ESPÍRITO SANTO": "ES", "PARANA": "PR", "PARANÁ": "PR",
+        "RIO GRANDE DO SUL": "RS", "SANTA CATARINA": "SC", "DISTRITO FEDERAL": "DF",
+        "GOIAS": "GO", "GOIÁS": "GO", "BAHIA": "BA", "PERNAMBUCO": "PE", "CEARA": "CE", "CEARÁ": "CE",
+        "RIO GRANDE DO NORTE": "RN", "PARAIBA": "PB", "PARAÍBA": "PB", "PIAUI": "PI", "PIAUÍ": "PI",
+        "MARANHAO": "MA", "MARANHÃO": "MA", "ALAGOAS": "AL", "SERGIPE": "SE",
+        "PARA": "PA", "PARÁ": "PA", "AMAPA": "AP", "AMAPÁ": "AP", "AMAZONAS": "AM", "ACRE": "AC",
+        "RONDONIA": "RO", "RONDÔNIA": "RO", "RORAIMA": "RR", "MATO GROSSO DO SUL": "MS",
+        "MATO GROSSO": "MT", "TOCANTINS": "TO",
     }
     s = s.replace(mapa)
-    s = s.str[-2:]  # se vier "UF-XX" etc
+    s = s.str[-2:]
     s = s.where(s.isin(UF_VALIDAS), np.nan)
     return s
 
-def to_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
-
 def pick_numeric_column(df: pd.DataFrame, prefer: List[str]) -> Optional[str]:
-    # tenta achar uma coluna numérica; prioriza nomes sugeridos
     cols = df.columns.tolist()
     for p in prefer:
-        if p in cols and pd.api.types.is_numeric_dtype(to_numeric(df[p])):
-            return p
-    # fallback: primeira com bastante valores numéricos
+        if p in cols:
+            ser = to_numeric(df[p])
+            if ser.notna().sum() > 0:
+                return p
     for c in cols:
-        try:
-            if to_numeric(df[c]).notna().sum() > 0:
-                return c
-        except Exception:
-            continue
+        ser = to_numeric(df[c])
+        if ser.notna().sum() > 0:
+            return c
     return None
 
 def draw_kpis(df: pd.DataFrame, uf_col: Optional[str], ano_col: Optional[str]):
@@ -229,7 +237,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# estado de sessão
 if "df_anvisa" not in st.session_state:
     st.session_state.df_anvisa = None
 
@@ -242,10 +249,14 @@ if page == "ANVISA (nacional)":
     if st.button("Carregar agora", type="primary"):
         with st.spinner("Carregando…"):
             try:
-                df = fetch_csv(url)
+                df_raw, sep_usado, enc_usado = fetch_csv_robusto(url)
+                df = df_raw.copy()
                 df.columns = [c.strip().lower() for c in df.columns]
                 st.session_state.df_anvisa = df
-                st.success(f"Base carregada com {df.shape[0]:,} linhas × {df.shape[1]:,} colunas.")
+                st.success(
+                    f"Base carregada com {df.shape[0]:,} linhas × {df.shape[1]:,} colunas. "
+                    f"(sep={sep_usado}, encoding={enc_usado})"
+                )
             except Exception as e:
                 st.error(f"Falha ao carregar: {e}")
 
@@ -253,7 +264,8 @@ if page == "ANVISA (nacional)":
         up = st.file_uploader("CSV nacional (alternativo)", type=["csv"], key="up_nac")
         if up is not None:
             try:
-                df = pd.read_csv(up, sep=",", encoding="utf-8", low_memory=False)
+                # Também robusto no upload
+                df = pd.read_csv(up, sep=None, engine="python", on_bad_lines="skip", low_memory=False)
                 df.columns = [c.strip().lower() for c in df.columns]
                 st.session_state.df_anvisa = df
                 st.success(f"Base carregada com {df.shape[0]:,} linhas × {df.shape[1]:,} colunas.")
@@ -270,22 +282,18 @@ if page == "ANVISA (nacional)":
 
     st.markdown("### KPIs automáticos")
     cols = df.columns.tolist()
-    # detectar sugestões
     ano_sug = next((c for c in cols if "ano" in c and "ref" in c), None)
     uf_sug = "uf" if "uf" in cols else next((c for c in cols if "sigla" in c and "uf" in c), cols[0] if cols else None)
 
     ano_col = st.selectbox("Coluna de ano (opcional)", ["(nenhuma)"] + cols, index=(cols.index(ano_sug)+1) if ano_sug else 0)
     uf_col = st.selectbox("Coluna UF", cols, index=cols.index(uf_sug) if uf_sug else 0)
-    # escolher métrica
-    metrica_col = st.selectbox(
-        "Coluna MÉTRICA (numérica)",
-        options=cols,
-        index=cols.index("id da resposta") if "id da resposta" in cols else 0,
-        help="Escolha um campo numérico (ex.: total, quantidade, valor…)."
-    )
-    # KPIs
+
+    prefer = [c for c in ["quantidade", "qtd", "total", "valor", "transfusoes", "transfusões"] if c in cols]
+    metrica_sug = pick_numeric_column(df, prefer) or cols[0]
+    metrica_col = st.selectbox("Coluna MÉTRICA (numérica)", cols, index=cols.index(metrica_sug) if metrica_sug in cols else 0)
+
     draw_kpis(df, uf_col=uf_col, ano_col=None if ano_col == "(nenhuma)" else ano_col)
-    # MAPA
+
     st.markdown("### Mapa por UF")
     draw_map(df, uf_col=uf_col, metric_col=metrica_col)
 
@@ -300,7 +308,7 @@ elif page == "Estoques estaduais":
         st.info("Sem arquivo enviado.")
     else:
         try:
-            dfe = pd.read_csv(up, sep=",", encoding="utf-8", low_memory=False)
+            dfe = pd.read_csv(up, sep=None, engine="python", on_bad_lines="skip", low_memory=False)
             dfe.columns = [c.strip().lower() for c in dfe.columns]
         except Exception as e:
             st.error(f"Falha ao ler CSV estadual: {e}")
@@ -311,16 +319,14 @@ elif page == "Estoques estaduais":
                 st.dataframe(dfe.head(100), use_container_width=True)
 
             cols = dfe.columns.tolist()
-            # detecta colunas
             uf_col_e = "uf" if "uf" in cols else st.selectbox("Coluna UF", cols)
             dfe[uf_col_e] = normaliza_uf(dfe[uf_col_e])
 
             ano_e = next((c for c in cols if "ano" in c), None)
             ano_col_e = st.selectbox("Coluna de ano (opcional)", ["(nenhuma)"] + cols, index=(cols.index(ano_e)+1) if ano_e else 0)
 
-            # métrica: tenta estoque_atual, qtd, total…
-            prefer = [c for c in ["estoque_atual", "estoque_total", "qtd", "quantidade", "total", "valor"] if c in cols]
-            metrica_e = pick_numeric_column(dfe, prefer) or cols[0]
+            prefer_e = [c for c in ["estoque_atual", "estoque_total", "qtd", "quantidade", "total", "valor"] if c in cols]
+            metrica_e = pick_numeric_column(dfe, prefer_e) or cols[0]
             metrica_col_e = st.selectbox("Coluna MÉTRICA (numérica)", cols, index=cols.index(metrica_e) if metrica_e in cols else 0)
 
             st.markdown("### KPIs")
@@ -372,15 +378,12 @@ else:
     st.subheader("Sobre")
     st.write(
         """
-        **VisioData** — painel leve para explorar rapidamente dados públicos de produção e estoques hemoterápicos.
+        **VisioData** — painel leve para explorar dados públicos de produção e estoques hemoterápicos.
 
         **Recursos**  
-        • Carregamento direto do **Hemoprod (ANVISA)** por URL + upload alternativo  
-        • **KPIs** rápidos (registros, UFs, período)  
-        • **Mapa por UF** (ANVISA e estadual)  
-        • **Links por UF** para páginas/contatos oficiais dos hemocentros  
+        • Carregamento robusto do **Hemoprod (ANVISA)** por URL + upload  
+        • **KPIs** e **Mapa por UF** (ANVISA e estadual)  
+        • **Links por UF** para hemocentros  
         • Cadastro local (demo) de possíveis doadores
-
-        **Fontes**: ANVISA e hemocentros estaduais.
         """
     )
