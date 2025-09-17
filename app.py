@@ -1,344 +1,366 @@
 # VisioData — Estoques e Produção Hemoterápica (Brasil)
-# ------------------------------------------------------
-# Requisitos (pip): streamlit, pandas, numpy, pydeck
-# Rodar local (opcional): streamlit run app.py
+# -----------------------------------------------------
+# Rodar local: streamlit run app.py
+# Requisitos: ver requirements.txt
 
 import io
-from pathlib import Path
+import time
+import json
+import base64
 import numpy as np
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
+from pathlib import Path
 
-st.set_page_config(
-    page_title="VisioData — Estoques e Produção Hemoterápica",
-    layout="wide",
-)
+# ------------- CONFIG / ESTILO ----------------------------------------------
 
-# =============== ESTILO / CABEÇALHO ===============
+st.set_page_config(page_title="VisioData – Estoques e Produção Hemoterápica", layout="wide")
+
 CUSTOM_CSS = """
 <style>
 .title-row { display:flex; align-items:center; gap:.75rem; }
 .pill { background:#E10600; color:white; padding:.25rem .6rem; border-radius:999px; font-weight:700; }
 .muted { color:#6B7280; }
-footer { visibility:hidden; } /* esconde rodapé streamlit */
+footer { visibility:hidden; }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-c1, c2 = st.columns([1, 6])
+c1, c2 = st.columns([1,6])
 with c1:
-    # tenta achar um logo em várias pastas/nomes
-    LOGOS = [
-        "ativos/logo.svg","ativos/logo.png","assets/logo.svg","assets/logo.png",
-        "logo.svg","logo.png"
-    ]
-    showed_logo = False
-    for p in LOGOS:
-        if Path(p).exists():
-            st.image(p, width=120)
-            showed_logo = True
-            break
-    if not showed_logo:
-        st.write(":drop_of_blood:")
-
+    st.write(":drop_of_blood:")
 with c2:
     st.markdown(
         '<div class="title-row"><span class="pill">VisioData</span>'
-        '<h2 style="margin:0">Painel de Estoques e Produção Hemoterápica</h2></div>',
+        "<h2 style='margin:0'>Painel de Estoques e Produção Hemoterápica</h2></div>",
         unsafe_allow_html=True,
     )
-    st.caption("Fontes oficiais e dados agregados — pronto para apresentação acadêmica.")
+st.caption("Fontes oficiais e dados agregados — pronto para apresentação acadêmica.")
 
-# =============== HELPERS ===============
-UF_COORD = {
-    "AC": (-70.55, -9.02), "AL": (-36.28, -9.62), "AM": (-62.00, -3.47), "AP": (-51.07, 0.04),
-    "BA": (-41.55, -12.97), "CE": (-39.26, -5.79), "DF": (-47.86, -15.79), "ES": (-40.34, -19.58),
-    "GO": (-49.25, -16.64), "MA": (-45.78, -5.42), "MG": (-44.56, -18.10), "MS": (-54.62, -20.48),
-    "MT": (-56.10, -12.64), "PA": (-52.47, -4.47), "PB": (-36.78, -7.12), "PE": (-36.90, -8.05),
-    "PI": (-42.80, -8.64), "PR": (-51.23, -24.89), "RJ": (-42.52, -22.84), "RN": (-36.51, -5.79),
-    "RO": (-62.80, -10.83), "RR": (-61.40, 2.82), "RS": (-53.21, -30.03), "SC": (-48.55, -27.59),
-    "SE": (-37.07, -10.91), "SP": (-46.64, -23.55), "TO": (-48.33, -10.18),
-}
+# ------------- UTILS --------------------------------------------------------
 
-NOME2UF = {
-    'acre':'AC','alagoas':'AL','amazonas':'AM','amapá':'AP','bahia':'BA','ceará':'CE','distrito federal':'DF',
-    'espírito santo':'ES','goiás':'GO','maranhão':'MA','minas gerais':'MG','mato grosso do sul':'MS',
-    'mato grosso':'MT','pará':'PA','paraíba':'PB','pernambuco':'PE','piauí':'PI','paraná':'PR',
-    'rio de janeiro':'RJ','rio grande do norte':'RN','rondônia':'RO','roraima':'RR','rio grande do sul':'RS',
-    'santa catarina':'SC','sergipe':'SE','são paulo':'SP','tocantins':'TO'
-}
+@st.cache_data(show_spinner=False)
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [str(c).strip().lower() for c in out.columns]
+    return out
 
-# População aprox. (milhares) — só para taxa por 100k hab.
-POP_UF = {
-    "AC": 906, "AL": 3354, "AM": 4209, "AP": 877, "BA": 14876, "CE": 9012, "DF": 3106, "ES": 4106,
-    "GO": 7296, "MA": 6776, "MG": 20566, "MS": 2756, "MT": 3786, "PA": 8698, "PB": 4036, "PE": 9206,
-    "PI": 3282, "PR": 11446, "RJ": 16056, "RN": 3506, "RO": 1856, "RR": 736, "RS": 10886, "SC": 7616,
-    "SE": 2366, "SP": 44266, "TO": 1616,
-}
+@st.cache_data(show_spinner=True)
+def load_csv_robust(url_or_file, sep=None, encodings=("utf-8", "latin-1")) -> pd.DataFrame:
+    """
+    Lê CSV local/upload/URL tentando separadores e encodings comuns.
+    """
+    errs = []
+    for enc in encodings:
+        for sep_try in (sep, ",", ";", "|"):
+            if sep_try is None:
+                continue
+            try:
+                df = pd.read_csv(url_or_file, sep=sep_try, encoding=enc, engine="python")
+                return df
+            except Exception as e:
+                errs.append(f"[enc={enc} sep={sep_try}]: {e}")
+    # última tentativa sem forçar sep
+    for enc in encodings:
+        try:
+            df = pd.read_csv(url_or_file, encoding=enc)
+            return df
+        except Exception as e:
+            errs.append(f"[enc={enc} sep=auto]: {e}")
+    raise ValueError("Falha ao ler CSV -> " + " | ".join(errs))
 
-def _first_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    cols = [c for c in df.columns]
-    low = {c.lower(): c for c in cols}
-    for cand in candidates:
-        if cand in low: 
-            return low[cand]
-    for c in cols:
-        if any(x in c.lower() for x in candidates):
+def first_col(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
             return c
     return None
 
-def _coerce_uf(series: pd.Series) -> pd.Series:
-    s = series.astype(str).str.strip()
-    su = s.str.upper()
-    # já está UF de 2 chars?
-    ok = su.where(su.str.len()==2)
-    miss = ok.isna()
-    if miss.any():
-        lowered = s.str.lower()
-        mapped = lowered.map(NOME2UF)
-        ok = ok.fillna(mapped.str.upper())
-    return ok
+# Mapa: coordenadas aproximadas por UF (centroides do estado)
+UF_COORD = {
+    'AC': (-9.02,  -70.81), 'AL': (-9.62,  -36.82), 'AM': (-4.13,  -60.02),
+    'AP': (0.04,   -51.05), 'BA': (-12.97, -38.51), 'CE': (-5.18,  -39.45),
+    'DF': (-15.78, -47.93), 'ES': (-20.32, -40.34), 'GO': (-16.64, -49.25),
+    'MA': (-4.23,  -43.94), 'MG': (-18.10, -44.62), 'MS': (-20.48, -54.62),
+    'MT': (-12.64, -55.42), 'PA': (-1.41,  -48.44), 'PB': (-7.12,  -36.72),
+    'PE': (-8.05,  -34.90), 'PI': (-8.03,  -42.42), 'PR': (-25.43, -49.27),
+    'RJ': (-22.91, -43.17), 'RN': (-5.79,  -35.21), 'RO': (-11.22, -62.80),
+    'RR': (2.82,   -60.67), 'RS': (-30.03, -51.23), 'SC': (-27.59, -48.55),
+    'SE': (-10.91, -37.07), 'SP': (-23.55, -46.64), 'TO': (-10.18, -48.33),
+}
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _load_csv_robust(url_or_buf, encodings=("utf-8","latin-1"), seps=(",", ";", "\t")) -> pd.DataFrame:
-    errs = []
-    for enc in encodings:
-        for sep in seps:
-            try:
-                df = pd.read_csv(url_or_buf, encoding=enc, sep=sep, engine="python")
-                # normaliza colunas
-                df.columns = [c.strip() for c in df.columns]
-                return df
-            except Exception as e:
-                errs.append(f"{enc}/{sep}: {e}")
-                continue
-    raise ValueError("Falha ao ler CSV — " + " | ".join(errs))
+# População (aprox.) para taxa/100k (IBGE arredondado)
+POP_UF = {
+    "AC": 0.906e6, "AL": 3.377e6, "AM": 4.269e6, "AP": 0.877e6, "BA": 14.87e6,
+    "CE": 9.26e6, "DF": 3.10e6, "ES": 4.10e6, "GO": 7.29e6, "MA": 6.77e6,
+    "MG": 20.6e6, "MS": 2.75e6, "MT": 3.78e6, "PA": 8.69e6, "PB": 4.03e6,
+    "PE": 9.60e6, "PI": 3.29e6, "PR": 11.44e6, "RJ": 16.05e6, "RN": 3.50e6,
+    "RO": 1.86e6, "RR": 0.73e6, "RS": 10.88e6, "SC": 7.61e6, "SE": 2.36e6,
+    "SP": 44.42e6, "TO": 1.61e6
+}
 
-def _numericize(series: pd.Series) -> pd.Series:
-    """Converte strings para número robustamente (corrige SP/RJ=0 quando há lixo)"""
-    s = series.astype(str).str.replace("\u00a0","", regex=False).str.strip()
-    # remove milhares '.' e troca vírgula por ponto se existir
-    s = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
-    out = pd.to_numeric(s, errors="coerce")
-    return out
+# Links úteis por UF (oficiais onde conhecido; genéricos para as demais)
+LINKS_UF = {
+    "SP": {"Pró-Sangue (SP)": "https://www.prosangue.sp.gov.br/"},
+    "RJ": {"HEMORIO (RJ)": "https://www.hemorio.rj.gov.br/"},
+}
+# para as demais UFs, criaremos links genéricos: site SES (busca), portal gov.br do estado
+for uf in UF_COORD:
+    if uf not in LINKS_UF:
+        LINKS_UF[uf] = {
+            f"Secretaria de Saúde {uf} (busca)": f"https://www.google.com/search?q=hemocentro+{uf}",
+            f"Portal gov.br {uf} (busca)": f"https://www.google.com/search?q=doa%C3%A7%C3%A3o+de+sangue+{uf}"
+        }
 
-# =============== NAVEGAÇÃO ===============
+# ------------- SIDEBAR ------------------------------------------------------
+
 st.sidebar.header("Navegação")
-page = st.sidebar.radio("Escolha a seção", ["ANVISA (nacional)", "Estoques estaduais", "Sobre"], index=0)
+page = st.sidebar.radio(
+    "Escolha a seção",
+    ["ANVISA (nacional)", "Estoques estaduais", "Cadastro de doadores", "Sobre"],
+    index=0
+)
 
-# =============== PÁGINA ANVISA (principal) ===============
+# ------------- PÁGINA: ANVISA ----------------------------------------------
+
+DEFAULT_URL = (
+    "https://www.gov.br/anvisa/pt-br/centraisdeconteudo/publicacoes/"
+    "sangue-tecidos-celulas-e-orgaos/producao-e-avaliacao-de-servicos-de-hemoterapia/"
+    "dados-brutos-de-producao-hemoterapica-1/hemoprod_nacional.csv"
+)
+
 if page == "ANVISA (nacional)":
     st.subheader("Produção hemoterápica — ANVISA (Hemoprod)")
-    st.caption("Dados brutos nacionais (CSV) a partir de 2022 — ver página oficial para dicionário e atualizações.")
 
-    DEFAULT_URL = (
-        "https://www.gov.br/anvisa/pt-br/centraisdeconteudo/publicacoes/"
-        "sangue-tecidos-celulas-e-orgaos/producao-e-avaliacao-de-servicos-de-hemoterapia/"
-        "dados-brutos-de-producao-hemoterapica-1/hemoprod_nacional.csv"
-    )
+    url = st.text_input("URL do CSV (Hemoprod — ANVISA)", value=DEFAULT_URL, label_visibility="visible")
+    c_btn1, c_btn2 = st.columns([1,2])
+    with c_btn1:
+        go = st.button("Carregar agora", type="primary")
+    with c_btn2:
+        st.caption("...ou envie o CSV (alternativa)")
 
-    url = st.text_input("URL do CSV nacional (Hemoprod — ANVISA)", value=DEFAULT_URL)
-    up = st.file_uploader("...ou envie um CSV (alternativa)", type=["csv"])
+    upfile = st.file_uploader("Drag and drop file here", type=["csv"], label_visibility="collapsed")
 
-    # carrega base
+    df_raw = None
     try:
-        if up is not None:
-            df = _load_csv_robust(up)  # upload
-        else:
-            df = _load_csv_robust(url)  # remoto
-
-        # normaliza e preenche colunas úteis
-        # detecta potenciais colunas
-        cand_ano = ["ano", "ano de referência", "ano_referencia", "ano referencia", "ano referência"]
-        cand_uf  = ["uf", "unidade federativa", "estado", "sigla uf"]
-
-        ano_col = _first_col(df, cand_ano) or st.selectbox("Escolha a coluna de ano", list(df.columns))
-        if ano_col not in df.columns:
-            st.warning("Não encontrei uma coluna de ano.")
-        uf_col_guess = _first_col(df, cand_uf)
-
-        # coluna UF se existir -> coerção para sigla
-        if uf_col_guess:
-            df["uf"] = _coerce_uf(df[uf_col_guess])
-        elif "uf" not in df.columns:
-            df["uf"] = np.nan  # deixa em branco para não quebrar
-
-        # tenta encontrar colunas com quantidade/valor/coletas/uso
-        num_candidates = []
-        for c in df.columns:
-            if df[c].dtype.kind in "iufc":  # já numérico
-                num_candidates.append(c)
-            else:
-                # se é texto mas parece número, tentaremos converter mais tarde
-                if any(k in c.lower() for k in ["valor","quant","colet","uso","transfus"]):
-                    num_candidates.append(c)
-
-        # escolha de colunas (e conversão numérica robusta)
-        st.markdown("### KPIs automáticos")
-        c_top = st.columns(3)
-        with c_top[0]:
-            sel_ano_col = st.selectbox("Coluna de ano (se não detectar)", options=[ano_col] + [c for c in df.columns if c!=ano_col], index=0)
-        with c_top[1]:
-            sel_uf_col = st.selectbox("Coluna UF (se existir)", options=["uf"] + [c for c in df.columns if c != "uf"], index=0)
-        with c_top[2]:
-            # métrica padrão: tenta valor/coletas/uso; caso contrário, qualquer numérica
-            default_metric = None
-            for key in ["colet", "uso", "transfus", "valor", "quant"]:
-                pick = [c for c in num_candidates if key in c.lower()]
-                if pick:
-                    default_metric = pick[0]; break
-            sel_metric = st.selectbox(
-                "Coluna MÉTRICA (numérica)",
-                options=num_candidates if num_candidates else list(df.columns),
-                index=(num_candidates.index(default_metric) if default_metric in (num_candidates or []) else 0)
-            )
-
-        # normalizações que afetam SP/RJ = 0 se o dado veio como string
-        df[sel_metric] = _numericize(df[sel_metric]).fillna(0)
-        # ano como inteiro (quando possível)
-        try:
-            df[sel_ano_col] = pd.to_numeric(df[sel_ano_col], errors="coerce").astype("Int64")
-        except Exception:
-            pass
-
-        with st.expander("Amostra (100 linhas)"):
-            st.dataframe(df.head(100), use_container_width=True)
-
-        # filtros
-        col_filters = st.columns(3)
-        # lista de anos válidos
-        anos_validos = [a for a in sorted(df[sel_ano_col].dropna().unique()) if str(a) != "nan"]
-        with col_filters[0]:
-            ano_sel = st.selectbox("Filtrar por ano", options=["Todos"] + list(anos_validos), index=0)
-        with col_filters[1]:
-            ufs_validas = [u for u in sorted(df[sel_uf_col].dropna().unique()) if isinstance(u,str)]
-            uf_sel = st.multiselect("Filtrar por UF", options=ufs_validas, default=[])
-        with col_filters[2]:
-            agg_op = st.selectbox("Como agrego a métrica?", ["Soma", "Média", "Máximo", "Mínimo"], index=0)
-
-        df_work = df.copy()
-        if ano_sel != "Todos":
-            df_work = df_work[df_work[sel_ano_col] == ano_sel]
-        if uf_sel:
-            df_work = df_work[df_work[sel_uf_col].isin(uf_sel)]
-
-        # agregação
-        by = []
-        if sel_ano_col in df_work.columns: by.append(sel_ano_col)
-        if sel_uf_col  in df_work.columns: by.append(sel_uf_col)
-
-        if by:
-            gb = df_work.groupby(by, dropna=False)[sel_metric]
-            if agg_op == "Soma":    agg = gb.sum()
-            elif agg_op == "Média": agg = gb.mean()
-            elif agg_op == "Máximo": agg = gb.max()
-            else:                   agg = gb.min()
-            df_agg = agg.reset_index().rename(columns={sel_metric:"valor"})
-        else:
-            df_agg = df_work[[sel_metric]].rename(columns={sel_metric:"valor"})
-
-        # taxa por 100k (se tiver UF)
-        if sel_uf_col in df_agg.columns:
-            df_agg["pop_mil"] = df_agg[sel_uf_col].map(POP_UF)
-            df_agg["taxa_100k"] = (df_agg["valor"] / (df_agg["pop_mil"]*1000) * 100000).round(4)
-        else:
-            df_agg["taxa_100k"] = np.nan
-
-        # KPIs
-        k = st.columns(4)
-        with k[0]:
-            st.metric("Registros", f"{len(df_work):,}".replace(",","."))
-        with k[1]:
-            st.metric("UF distintas", f"{df_work[sel_uf_col].nunique(dropna=True)}")
-        with k[2]:
-            st.metric("Total (métrica)", f"{df_work[sel_metric].sum():,.0f}".replace(",","."))
-        with k[3]:
-            st.metric("Média/registro", f"{df_work[sel_metric].mean():,.2f}".replace(",", "."))
-
-        st.dataframe(df_agg, use_container_width=True)
-        st.download_button(
-            "Baixar resumo (CSV)",
-            data=df_agg.to_csv(index=False).encode("utf-8"),
-            file_name="resumo_hemoprod.csv",
-            mime="text/csv",
-        )
-
-        # -------- Mapa por UF (bolinhas) --------
-        st.markdown("### Mapa por UF")
-        if sel_uf_col in df_agg.columns:
-            # pega o recorte do ano selecionado (se "Todos", pega tudo e soma por UF)
-            df_map = df_agg.copy()
-            if ano_sel != "Todos" and sel_ano_col in df_map.columns:
-                df_map = df_map[df_map[sel_ano_col] == ano_sel]
-            # agrega por UF (soma)
-            df_map = df_map.groupby(sel_uf_col, dropna=True)["valor"].sum().reset_index()
-            df_map.columns = ["uf", "valor"]
-            df_map["valor"] = _numericize(df_map["valor"]).fillna(0)
-
-            # lat/lon
-            pts = []
-            for _, r in df_map.iterrows():
-                uf = str(r["uf"]).upper()
-                if uf in UF_COORD:
-                    lon, lat = UF_COORD[uf]
-                    pts.append({"position":[lon,lat], "uf": uf, "valor": float(r["valor"])})
-            df_pts = pd.DataFrame(pts)
-
-            if not df_pts.empty:
-                minv, maxv = float(df_pts["valor"].min()), float(df_pts["valor"].max())
-                def _scale(v):
-                    if maxv <= 0: return 5000
-                    return 3000 + 12000 * ((v - minv) / max(1e-9, (maxv - minv)))
-
-                df_pts["radius"] = df_pts["valor"].apply(_scale)
-                layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=df_pts,
-                    get_position="position",
-                    get_radius="radius",
-                    pickable=True,
-                    get_fill_color=[225,0,0,140],
-                )
-                view = pdk.ViewState(latitude=-14.2, longitude=-51.9, zoom=3.2)
-                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view,
-                                         tooltip={"text":"{uf}: {valor}"}))
-            else:
-                st.info("Sem dados suficientes para o mapa (UF + métrica).")
-        else:
-            st.info("Para o mapa, é necessário ter uma coluna de UF e escolher uma métrica numérica.")
-
+        if go and url.strip():
+            df_raw = load_csv_robust(url, sep=",")
+        elif upfile is not None:
+            df_raw = load_csv_robust(upfile, sep=",")
     except Exception as e:
-        st.error(f"Falha ao carregar: {e}")
+        st.error(f"Erro ao carregar: {e}")
 
-# =============== PÁGINA ESTADUAL (placeholder) ===============
+    if df_raw is not None:
+        st.success(f"Base carregada: {len(df_raw):,} linhas × {df_raw.shape[1]} colunas.")
+        df = normalize_columns(df_raw)
+
+        with st.expander("Amostra (100 linhas)", expanded=False):
+            st.dataframe(df.head(100), use_container_width=True, height=360)
+
+        tabs = st.tabs(["KPIs automáticos", "Mapa por UF"])
+        with tabs[0]:
+            # Autodetectar possíveis colunas
+            ano_col = first_col(df, ["ano de referência", "ano", "ano_referencia", "ano referencia"])
+            uf_col = first_col(df, ["uf", "estado", "sigla_uf", "unidade_federativa"])
+            # Métricas possíveis por nome
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            # Sugestões comumente encontradas
+            metric_coleta = first_col(df, ["coletas", "qtd_coletas", "coleta_total"])
+            metric_uso = first_col(df, ["transfusões", "transfusoes", "qtd_transfusões", "qtd_transfusoes", "uso_total"])
+
+            sel_ano = st.selectbox("Coluna de ano (se não detectar)", [ano_col] + [None] + list(df.columns), index=0 if ano_col else 1)
+            sel_uf  = st.selectbox("Coluna UF (se existir)", [uf_col] + [None] + list(df.columns), index=0 if uf_col else 1)
+
+            # Onde não detectado, oferecemos uma lista curta de métricas
+            default_metric = metric_coleta or metric_uso or (num_cols[0] if num_cols else None)
+            options_metric = ([default_metric] + num_cols) if default_metric else num_cols
+            sel_metric = st.selectbox("Coluna MÉTRICA (numérica)", options_metric)
+
+            group = []
+            if sel_ano: group.append(sel_ano)
+            if sel_uf and sel_uf in df.columns: group.append(sel_uf)
+
+            if sel_metric:
+                g = df.groupby(group, dropna=False)[sel_metric].sum(numeric_only=True).reset_index().rename(columns={sel_metric:"valor"})
+                c1, c2 = st.columns([2,2])
+                with c1:
+                    st.metric("Registros", f"{len(df):,}")
+                    st.write("Colunas:", ", ".join(df.columns[:30]))
+                with c2:
+                    if sel_uf and sel_uf in df.columns:
+                        st.metric("UF distintas", f"{df[sel_uf].nunique():,}")
+                st.dataframe(g, use_container_width=True, height=420)
+                # taxa por 100k se houver UF
+                if sel_uf and sel_uf in g.columns:
+                    g2 = g.copy()
+                    g2["uf"] = g2[sel_uf].astype(str).str.upper().str[:2]
+                    if "uf" in g2.columns:
+                        g2["pop"] = g2["uf"].map(POP_UF).fillna(np.nan)
+                        g2["taxa_100k"] = (g2["valor"] / g2["pop"] * 100000).round(4)
+                        st.caption("Taxa por 100k (se houver população mapeada para a UF):")
+                        st.dataframe(g2, use_container_width=True, height=320)
+            else:
+                st.info("Selecione uma coluna numérica para calcular os KPIs.")
+
+        with tabs[1]:
+            st.caption("Selecione uma UF e uma coluna métrica (numérica) para renderizar o mapa.")
+            ano_col = first_col(df, ["ano de referência","ano","ano_referencia","ano referencia"])
+            uf_col  = first_col(df, ["uf","estado","sigla_uf","unidade_federativa"])
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+            sel_ano = st.selectbox("Coluna de ano (se não detectar)", [ano_col] + [None] + list(df.columns), index=0 if ano_col else 1, key="map_ano")
+            sel_uf  = st.selectbox("Coluna UF", [uf_col] + [None] + list(df.columns), index=0 if uf_col else 1, key="map_uf")
+            sel_val = st.selectbox("Coluna de valor (coletas/uso, etc)", num_cols, key="map_val")
+
+            if sel_uf and sel_val and sel_uf in df.columns:
+                # agregamos por UF (e por ano, se informado)
+                group = [sel_uf]
+                if sel_ano: group.append(sel_ano)
+                g = df.groupby(group, dropna=False)[sel_val].sum(numeric_only=True).reset_index().rename(columns={sel_val:"valor"})
+
+                # Usar última informação por UF se houver ano
+                if sel_ano and sel_ano in g.columns:
+                    g = g.sort_values(sel_ano).groupby(sel_uf).tail(1)
+
+                # prepara pontos
+                pts = []
+                for _, r in g.iterrows():
+                    uf = str(r[sel_uf]).upper()[:2]
+                    if uf in UF_COORD:
+                        lat, lon = UF_COORD[uf]
+                        pts.append({"position":[lon, lat], "uf":uf, "valor":float(r["valor"])})
+                if pts:
+                    layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=pts,
+                        get_position="position",
+                        get_radius="valor",
+                        radius_scale=0.5, radius_min_pixels=5,
+                        pickable=True,
+                        get_fill_color=[225,0,0,140],
+                    )
+                    view = pdk.ViewState(latitude=-14.235, longitude=-51.9253, zoom=3)
+                    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view, tooltip={"text":"{uf}: {valor}"}))
+                else:
+                    st.info("Sem dados suficientes para o mapa (verifique UF e métrica).")
+            else:
+                st.info("Para o mapa, preciso de UF e uma métrica numérica.")
+
+# ------------- PÁGINA: ESTOQUES ESTADUAIS ----------------------------------
+
 elif page == "Estoques estaduais":
-    st.subheader("Estoques por tipo sanguíneo — Fontes estaduais (upload manual)")
-    st.caption("Envie um CSV com colunas: data, uf, hemocentro, tipo, rh, estoque_atual, estoque_minimo")
-    up2 = st.file_uploader("Enviar CSV estadual", type=["csv"])
-    if up2:
-        try:
-            dfe = _load_csv_robust(up2)
-            dfe.columns = [c.strip().lower() for c in dfe.columns]
-            if "uf" in dfe.columns:
-                dfe["uf"] = _coerce_uf(dfe["uf"])
-            if "estoque_atual" in dfe.columns and "estoque_minimo" in dfe.columns:
-                dfe["estoque_atual"]  = _numericize(dfe["estoque_atual"])
-                dfe["estoque_minimo"] = _numericize(dfe["estoque_minimo"])
-                dfe["cobertura"] = (dfe["estoque_atual"] / dfe["estoque_minimo"]).replace([np.inf, -np.inf], np.nan)
-            st.dataframe(dfe.head(200), use_container_width=True)
-            if "cobertura" in dfe.columns:
-                alertas = dfe[dfe["cobertura"] < 1.0].sort_values("cobertura")
-                st.markdown("**Alertas (abaixo do mínimo)**")
-                st.dataframe(alertas, use_container_width=True)
-        except Exception as e:
-            st.error(f"Erro ao ler CSV estadual: {e}")
+    st.subheader("Produção hemoterápica – ANVISA (Hemoprod)")
 
-# =============== SOBRE ===============
-else:
-    st.subheader("Sobre")
-    st.markdown(
-        "- Fonte nacional: **ANVISA/Hemoprod** (dados brutos).  \n"
-        "- O painel usa **dados agregados** (LGPD).  \n"
-        "- Código aberto para fins acadêmicos e sociais."
+    st.write("Envie um CSV **estadual** com colunas: `data`, `uf`, `hemocentro`, `tipo`, `rh`, `estoque_atual`, `estoque_minimo`.")
+    up_state = st.file_uploader("Enviar CSV estadual", type=["csv"])
+    df_state = None
+    if up_state is not None:
+        try:
+            df_state = load_csv_robust(up_state, sep=",")
+        except Exception as e:
+            st.error(f"Erro ao ler: {e}")
+
+    # Links por UF
+    st.markdown("### Links por UF (doação, hemocentros, informações oficiais)")
+    grid = st.columns(4)
+    ufs = sorted(UF_COORD.keys())
+    for i, uf in enumerate(ufs):
+        with grid[i % 4]:
+            st.markdown(f"**{uf}**")
+            for label, url in LINKS_UF.get(uf, {}).items():
+                st.link_button(label, url, use_container_width=True, type="secondary")
+
+    if df_state is not None:
+        st.markdown("### Amostra dos dados enviados")
+        st.dataframe(normalize_columns(df_state).head(200), use_container_width=True, height=360)
+
+        # Indicadores simples se existir estoque
+        df2 = normalize_columns(df_state)
+        need_cols = ["uf","estoque_atual","estoque_minimo"]
+        if all(c in df2.columns for c in need_cols):
+            g = df2.groupby("uf")[["estoque_atual","estoque_minimo"]].sum(numeric_only=True)
+            g["cobertura"] = (g["estoque_atual"] / g["estoque_minimo"]).replace([np.inf,-np.inf], np.nan)
+            st.markdown("### Cobertura por UF (estoque atual / estoque mínimo)")
+            st.dataframe(g.reset_index(), use_container_width=True, height=360)
+
+            # alerta simples
+            criticos = g[g["cobertura"] < 0.8].index.tolist()
+            if criticos:
+                st.error("Cobertura crítica (< 0,8) em: " + ", ".join(criticos))
+            elif not g.empty:
+                st.success("Nenhuma UF em nível crítico segundo o arquivo enviado.")
+
+# ------------- PÁGINA: CADASTRO DE DOADORES --------------------------------
+
+elif page == "Cadastro de doadores":
+    st.subheader("Cadastro de possíveis doadores")
+
+    # estado em memória (sessão) — no Streamlit Cloud é efêmero
+    if "donors" not in st.session_state:
+        st.session_state["donors"] = []
+
+    with st.form("donor_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            nome = st.text_input("Nome completo *")
+            email = st.text_input("E-mail *")
+            telefone = st.text_input("Telefone/WhatsApp")
+        with c2:
+            uf = st.selectbox("UF *", sorted(UF_COORD.keys()))
+            cidade = st.text_input("Cidade")
+            tipo_sanguineo = st.selectbox("Tipo sanguíneo *", ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
+        consent = st.checkbox("Aceito ser contatado/a por hemocentros/serviços oficiais.", value=True)
+        submitted = st.form_submit_button("Cadastrar doador", type="primary")
+
+    if submitted:
+        if nome and email and uf and tipo_sanguineo and consent:
+            st.session_state["donors"].append(
+                {
+                    "data": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                    "nome": nome, "email": email, "telefone": telefone,
+                    "cidade": cidade, "uf": uf, "tipo_sanguineo": tipo_sanguineo,
+                    "consentimento": bool(consent)
+                }
+            )
+            st.success("Cadastro recebido! Obrigado por se voluntariar ❤️")
+        else:
+            st.warning("Preencha os campos obrigatórios (*) e aceite o consentimento.")
+
+    if st.session_state["donors"]:
+        st.markdown("### Banco local de doadores (sessão)")
+        dfd = pd.DataFrame(st.session_state["donors"])
+        st.dataframe(dfd, use_container_width=True, height=360)
+
+        # botão de download
+        csv = dfd.to_csv(index=False).encode("utf-8")
+        st.download_button("Baixar CSV dos cadastros", data=csv, file_name="cadastro_doadores.csv", mime="text/csv")
+
+        # contagens rápidas por UF / tipo
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("Contagem por UF")
+            st.dataframe(dfd["uf"].value_counts().rename_axis("uf").reset_index(name="cadastros"), use_container_width=True, height=300)
+        with c2:
+            st.caption("Contagem por tipo sanguíneo")
+            st.dataframe(dfd["tipo_sanguineo"].value_counts().rename_axis("tipo").reset_index(name="cadastros"), use_container_width=True, height=300)
+    else:
+        st.info("Nenhum cadastro nesta sessão ainda.")
+
+# ------------- PÁGINA: SOBRE ------------------------------------------------
+
+elif page == "Sobre":
+    st.subheader("Sobre o projeto")
+    st.write(
+        """
+        **VisioData** é um painel em Streamlit para exploração de dados públicos sobre
+        produção e estoques hemoterápicos no Brasil.  
+        - **ANVISA (Hemoprod):** leitura direta via URL oficial ou upload do CSV  
+        - **KPIs e mapa por UF:** agregados simples e visualização geográfica  
+        - **Estoques estaduais:** upload do arquivo do seu estado para cálculo de cobertura  
+        - **Cadastro de doadores:** formulário voluntário (armazenamento temporário na sessão)  
+
+        O propósito é **acadêmico** e para **divulgação**: sempre cite a **fonte ANVISA**
+        ou os órgãos estaduais quando compartilhar os resultados.
+        """
     )
+    st.caption("Autor: você. Repositório: GitHub → rogerreistec/Visiodata")
