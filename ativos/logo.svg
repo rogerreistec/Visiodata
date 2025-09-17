@@ -1,0 +1,9 @@
+<svg width="180" height="40" viewBox="0 0 180 40" xmlns="http://www.w3.org/2000/svg">
+  <rect rx="8" width="180" height="40" fill="#E10600"/>
+  <g transform="translate(12,10)">
+    <circle cx="12" cy="10" r="8" fill="white"/>
+    <rect x="8" y="8" width="8" height="4" fill="#E10600"/>
+    <rect x="11" y="6" width="2" height="8" fill="#E10600"/>
+  </g>
+  <text x="42" y="26" font-family="Inter, sans-serif" font-weight="700" font-size="16" fill="white">VisioData</text>
+</svg>
