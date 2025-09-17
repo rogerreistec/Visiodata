@@ -1,20 +1,26 @@
-# Virtualenv
-.venv/
-venv/
-
-# Python
+# Python / Build
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
 *.egg-info/
-*.egg
+dist/
+build/
 
-# Binários grandes e temporários
-*.so
-*.dll
-*.dylib
-.DS_Store
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Streamlit
+.streamlit/credentials.toml
+.streamlit/secrets.toml
+.streamlit/cache/
+.streamlit/
+
+# Jupyter / OS
 .ipynb_checkpoints/
-.env
-.cache/
+.DS_Store
+
+# Devcontainers / Node
+.devcontainer/
+node_modules/
