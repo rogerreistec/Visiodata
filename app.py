@@ -1,14 +1,12 @@
 # app.py
 # VisioData – Painel de Estoques e Produção Hemoterápica
 # Seções: ANVISA (nacional), Estoques estaduais (links), Cadastrar doador, Sobre.
-# >>> Correção principal: leitura de CSV sem passar low_memory ao engine="python".
 
 from __future__ import annotations
 
 import io
-import os
 import textwrap
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -25,7 +23,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Estilinho rápido para o selo VisioData na barra lateral
+# Selo VisioData na sidebar
 st.sidebar.markdown(
     """
     <div style="display:flex;gap:.6rem;align-items:center;">
@@ -39,134 +37,106 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
+
 # -----------------------------------------------------------------------------
 # Utilidades
 # -----------------------------------------------------------------------------
-
 @st.cache_data(show_spinner=False)
 def read_csv_robusto(origem: str | bytes, uploaded: bool = False) -> pd.DataFrame:
     """
-    Lê CSV de forma resiliente (URL ou upload). Remove a combinação problemática
-    low_memory + engine='python'. Faz inferência de separador e codificação.
-
-    Parameters
-    ----------
-    origem : str|bytes
-        URL (str) ou conteúdo do arquivo (bytes) quando uploaded=True.
-    uploaded : bool
-        True quando o conteúdo vem de st.file_uploader (bytes/BytesIO).
-
-    Returns
-    -------
-    pd.DataFrame
+    Lê CSV (URL ou upload) de forma resiliente.
+    >>> Importante: NÃO usa low_memory com engine='python'.
     """
-    # 1) Origem: caminho ou bytes
+    # monta buffer se for upload
     if uploaded:
         byts = origem if isinstance(origem, (bytes, bytearray)) else origem.read()
         buf = io.BytesIO(byts)
     else:
         buf = origem  # URL string
 
-    # 2) Tentativa 1: sep=None (Sniffer) com engine='python'
+    # 1) Tentativa: detecção de separador
     try:
         df = pd.read_csv(
             buf,
-            sep=None,             # infere o separador
-            engine="python",      # mais tolerante a CSVs bagunçados
-            on_bad_lines="skip",  # ignora linhas ruins (pandas>=1.4)
-            dtype=str             # lê inicialmente tudo como string
+            sep=None,
+            engine="python",
+            on_bad_lines="skip",
+            dtype=str,
         )
         if df.empty:
             raise ValueError("CSV vazio.")
         return df
     except Exception as e1:
-        # 3) Tentativa 2: assume ';'
+        # 2) Força ';'
         try:
             if uploaded:
                 buf.seek(0)
             df = pd.read_csv(
-                buf,
-                sep=";",
-                engine="python",
-                on_bad_lines="skip",
-                dtype=str
+                buf, sep=";", engine="python", on_bad_lines="skip", dtype=str
             )
             if df.empty:
                 raise ValueError("CSV vazio.")
             return df
         except Exception as e2:
-            # 4) Tentativa 3: assume ','
+            # 3) Força ','
             try:
                 if uploaded:
                     buf.seek(0)
                 df = pd.read_csv(
-                    buf,
-                    sep=",",
-                    engine="python",
-                    on_bad_lines="skip",
-                    dtype=str
+                    buf, sep=",", engine="python", on_bad_lines="skip", dtype=str
                 )
                 if df.empty:
                     raise ValueError("CSV vazio.")
                 return df
             except Exception as e3:
                 raise RuntimeError(
-                    f"Falha ao ler o CSV. "
-                    f"Tentativas: sep=None | ';' | ','\n"
+                    "Falha ao ler o CSV (sep=None, ';', ',').\n"
                     f"Erros: {e1}\n{e2}\n{e3}"
                 )
 
 def normaliza_colunas(df: pd.DataFrame) -> pd.DataFrame:
-    """Padroniza nomes de colunas (minúsculas, sem espaços extras)."""
     ren = {c: " ".join(c.strip().lower().split()) for c in df.columns}
     df = df.rename(columns=ren)
-    # remove colunas 'unnamed'
     drop_cols = [c for c in df.columns if c.startswith("unnamed")]
     if drop_cols:
         df = df.drop(columns=drop_cols, errors="ignore")
     return df
 
 def detecta_colunas(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str], List[str]]:
-    """
-    Tenta detectar as colunas de ano, uf e lista de métricas numéricas possíveis.
-    """
+    # ano
     col_ano = None
     for c in df.columns:
         if "ano" in c and ("ref" in c or "refer" in c or "referência" in c):
             col_ano = c
             break
-
+    # uf
     col_uf = None
     for c in df.columns:
         if c == "uf" or c.endswith(" uf") or c.startswith("uf "):
             col_uf = c
             break
-
-    # Numericáveis
-    possiveis_metricas: List[str] = []
+    # possíveis métricas (numéricas ou numéricas-possíveis)
+    possiveis = []
     for c in df.columns:
-        # ignora campos muito textuais
         if c in {col_ano, col_uf}:
             continue
-        # tenta converter para número rapidamente em amostra
-        amostra = pd.to_numeric(df[c].dropna().astype(str).str.replace(",", ".", regex=False),
-                                errors="coerce")
+        amostra = pd.to_numeric(
+            df[c].dropna().astype(str).str.replace(",", ".", regex=False),
+            errors="coerce",
+        )
         if amostra.notna().sum() > 0:
-            possiveis_metricas.append(c)
-
-    # preferência por "id da resposta"
-    if "id da resposta" in df.columns and "id da resposta" in possiveis_metricas:
-        possiveis_metricas = ["id da resposta"] + [m for m in possiveis_metricas if m != "id da resposta"]
-
-    return col_ano, col_uf, possiveis_metricas
+            possiveis.append(c)
+    if "id da resposta" in df.columns and "id da resposta" in possiveis:
+        possiveis = ["id da resposta"] + [x for x in possiveis if x != "id da resposta"]
+    return col_ano, col_uf, possiveis
 
 def to_numeric_safe(s: pd.Series) -> pd.Series:
     return pd.to_numeric(
         s.astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
-        errors="coerce"
+        errors="coerce",
     )
 
-# centros aproximados de UF (para o mapa com bolhas)
+# centroides aproximados por UF (para o mapa)
 UF_CENTER = {
     "AC": (-9.0238, -70.8120), "AL": (-9.5713, -36.7820), "AM": (-3.4168, -65.8561),
     "AP": (1.4156, -51.6022),  "BA": (-12.9694, -41.5556), "CE": (-5.4984, -39.3206),
@@ -184,7 +154,7 @@ def kpi_box(label: str, value: int | float | str):
 
 
 # -----------------------------------------------------------------------------
-# Seção: ANVISA (nacional)
+# Seção: ANVISA (nacional)  —  **AQUI FOI AJUSTADO**
 # -----------------------------------------------------------------------------
 def pagina_anvisa():
     st.header("Painel de Estoques e Produção Hemoterápica — ANVISA (Hemoprod)")
@@ -202,20 +172,15 @@ def pagina_anvisa():
             key="hemoprod_url",
         )
 
-        colb1, colb2 = st.columns([1, 1])
-        with colb1:
+        c1, c2 = st.columns([1, 1])
+        with c1:
             botao = st.button("Carregar agora", type="primary")
-
-        with colb2:
+        with c2:
             st.caption("…ou envie o CSV (alternativa)")
             upload = st.file_uploader(" ", type=["csv"], label_visibility="collapsed")
 
     df: Optional[pd.DataFrame] = None
     erro: Optional[str] = None
-
-    if botao and not url and not upload:
-        st.warning("Informe a URL do CSV ou envie um arquivo.")
-        return
 
     if botao or upload is not None:
         with st.spinner("Lendo a base…"):
@@ -228,146 +193,155 @@ def pagina_anvisa():
                 erro = str(e)
 
     if erro:
-        st.error(
-            "Falha ao carregar: "
-            "verifique a URL/arquivo. Mensagem técnica:\n\n" + erro
-        )
+        st.error("Falha ao carregar: " + erro)
         return
 
     if df is None:
         st.info("Preencha a URL ou envie um CSV e clique **Carregar agora**.")
         return
 
-    # Normaliza nomes e tenta detectar colunas-alvo
+    # normaliza e detecta colunas
     df = normaliza_colunas(df)
     col_ano, col_uf, metricas = detecta_colunas(df)
 
-    st.subheader("KPIs automáticos")
+    st.subheader("Configuração da agregação")
 
-    # Seletor de colunas (com padrões detectados)
-    c1, c2, c3 = st.columns([1, 1, 1])
+    # Coluna de Ano (opcional)
+    anos_opcoes = ["(Todos)"]
+    ano_recente = None
+    if col_ano and df[col_ano].notna().any():
+        # numéricos válidos (para 'Mais recente')
+        anos_num = pd.to_numeric(df[col_ano], errors="coerce")
+        if anos_num.notna().any():
+            ano_recente = int(anos_num.dropna().max())
+            anos_opcoes = ["(Mais recente)"] + sorted(
+                list(set(anos_num.dropna().astype(int).tolist())), reverse=True
+            )
+            anos_opcoes = ["(Todos)"] + anos_opcoes
 
-    with c1:
-        ano_col = st.selectbox(
-            "Coluna de ano (se não detectar)",
-            options=["<não há>"] + list(df.columns),
-            index=(df.columns.tolist().index(col_ano) + 1) if col_ano in df.columns else 0,
-            help="Se o arquivo não tiver coluna de ano, deixe como '<não há>'.",
-            key="anvisa_col_ano",
-        )
-        if ano_col == "<não há>":
-            ano_col = None
+    cc1, cc2, cc3 = st.columns([1, 1, 1])
 
-    with c2:
+    with cc1:
+        if anos_opcoes == ["(Todos)"]:
+            ano_escolhido = "(Todos)"
+        else:
+            # por padrão, mais recente
+            default_idx = anos_opcoes.index("(Mais recente)") if "(Mais recente)" in anos_opcoes else 0
+            ano_escolhido = st.selectbox("Ano", anos_opcoes, index=default_idx)
+
+    with cc2:
         uf_col = st.selectbox(
             "Coluna UF (se existe)",
             options=["<não há>"] + list(df.columns),
             index=(df.columns.tolist().index(col_uf) + 1) if col_uf in df.columns else 0,
-            help="Selecione a coluna que representa a UF (quando existir).",
             key="anvisa_col_uf",
         )
         if uf_col == "<não há>":
             uf_col = None
 
-    with c3:
+    with cc3:
         if len(metricas) == 0:
-            metricas = [c for c in df.columns if c not in {ano_col, uf_col}]
+            metricas = [c for c in df.columns if c not in {col_ano, uf_col}]
         met_col = st.selectbox(
-            "Coluna MÉTRICA (numérica)",
+            "Coluna MÉTRICA (para Soma)",
             options=metricas,
             index=0 if len(metricas) else 0,
-            help="Escolha a coluna que será somada/contada nas agregações.",
             key="anvisa_col_met",
         )
 
-    # KPIs
-    try:
-        total_reg = len(df)
-        k1, k2, k3 = st.columns(3)
-        with k1:
-            kpi_box("Registros", f"{total_reg:,}".replace(",", "."))
-        if ano_col:
-            anos_distintos = df[ano_col].nunique(dropna=True)
-        else:
-            anos_distintos = 0
-        with k2:
-            kpi_box("Anos distintos", anos_distintos)
+    # Tipo de agregação
+    cc4, cc5 = st.columns([1, 2])
+    with cc4:
+        oper = st.selectbox("Agregação", ["Soma", "Contagem"], index=0)
 
-        if uf_col:
-            ufs_distintas = df[uf_col].nunique(dropna=True)
-        else:
-            ufs_distintas = 0
-        with k3:
-            kpi_box("UF distintas", ufs_distintas)
-    except Exception:
-        pass
-
-    # Agregação por UF (e ano mais recente, quando existir)
+    # Filtra por ano, se escolhido
     df_ag = df.copy()
+    if col_ano and ano_escolhido != "(Todos)":
+        if ano_escolhido == "(Mais recente)" and (ano_recente is not None):
+            df_ag = df_ag[df_ag[col_ano].astype(str) == str(ano_recente)]
+        elif ano_escolhido not in {"(Todos)", "(Mais recente)"}:
+            df_ag = df_ag[df_ag[col_ano].astype(str) == str(ano_escolhido)]
 
-    # força métrica para número
-    df_ag[met_col] = to_numeric_safe(df_ag[met_col])
+    # KPIs principais
+    total_reg = len(df_ag)
+    anos_distintos = df_ag[col_ano].nunique(dropna=True) if col_ano else 0
+    ufs_distintas = df_ag[uf_col].nunique(dropna=True) if uf_col else 0
 
-    if ano_col and df_ag[ano_col].notna().any():
-        # usa o ano mais recente como padrão
-        try:
-            anos_validos = pd.to_numeric(df_ag[ano_col], errors="coerce")
-            ano_recente = int(anos_validos.dropna().max())
-        except Exception:
-            ano_recente = None
-        if ano_recente is not None:
-            st.caption(f"Agrupando pelo ano mais recente detectado: **{ano_recente}**")
-            df_ag = df_ag[df_ag[ano_col].astype(str) == str(ano_recente)]
-
+    # Agregação por UF
     if uf_col:
-        grupo = df_ag.groupby(uf_col, dropna=False, as_index=False)[met_col].sum()
-        grupo = grupo.rename(columns={uf_col: "uf", met_col: "valor"})
-        # limpa UFs inválidas
+        df_ag["__valor__"] = 1.0  # para contagem
+        if oper == "Soma":
+            df_ag["__valor__"] = to_numeric_safe(df_ag[met_col])
+            grupo = df_ag.groupby(uf_col, dropna=False, as_index=False)["__valor__"].sum()
+        else:
+            grupo = df_ag.groupby(uf_col, dropna=False, as_index=False)["__valor__"].sum()
+        grupo = grupo.rename(columns={uf_col: "uf", "__valor__": "valor"})
         grupo["uf"] = grupo["uf"].astype(str).str.upper().str.strip()
         grupo = grupo[grupo["uf"].isin(UF_CENTER.keys())]
     else:
         grupo = pd.DataFrame(columns=["uf", "valor"])
 
+    # KPI: total agregado (soma ou contagem)
+    total_agregado = float(grupo["valor"].sum()) if len(grupo) else 0.0
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        kpi_box("Registros", f"{total_reg:,}".replace(",", "."))
+    with k2:
+        kpi_box("Anos distintos", int(anos_distintos))
+    with k3:
+        kpi_box("UF distintas", int(ufs_distintas))
+    with k4:
+        txt = "Total (Soma)" if oper == "Soma" else "Total (Contagem)"
+        # formatação amigável
+        if total_agregado.is_integer():
+            kpi_box(txt, f"{int(total_agregado):,}".replace(",", "."))
+        else:
+            kpi_box(txt, f"{total_agregado:,.2f}".replace(",", "."))
+
+    st.caption(
+        f"Métrica: **{met_col}** | Agregação: **{oper}**"
+        + (f" | Ano: **{ano_recente}** (mais recente)" if col_ano and ano_escolhido == "(Mais recente)" else
+           ("" if ano_escolhido in {"(Todos)", "(Mais recente)"} else f" | Ano: **{ano_escolhido}**"))
+    )
+
+    # --------------------- MAPA ---------------------
     st.subheader("Mapa por UF")
     if len(grupo) == 0:
-        st.info("Não há dados suficientes para o mapa (verifique UF e métrica).")
+        st.info("Não há dados suficientes para o mapa (verifique UF e configuração).")
     else:
-        # monta a camada de bolhas
         plot_df = []
+        vmax = grupo["valor"].max() or 1
         for _, r in grupo.iterrows():
             uf = r["uf"]
             val = float(r["valor"]) if pd.notna(r["valor"]) else 0.0
             if uf in UF_CENTER:
                 lat, lon = UF_CENTER[uf]
                 plot_df.append(dict(uf=uf, valor=val, lat=lat, lon=lon))
+        plot_df = pd.DataFrame(plot_df)
+        # raio proporcional à raiz (evita bolhas desproporcionais)
+        plot_df["radius"] = 6000 + 4000 * np.sqrt(plot_df["valor"] / (vmax if vmax else 1))
 
-        if len(plot_df) == 0:
-            st.info("Não foi possível posicionar as UFs no mapa.")
-        else:
-            plot_df = pd.DataFrame(plot_df)
-            # escala para tamanho da bolha
-            rad = 5000 + 3000 * np.sqrt(plot_df["valor"].replace(0, np.nan).fillna(0) / (plot_df["valor"].max() or 1))
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=plot_df,
+            get_position=["lon", "lat"],
+            get_radius="radius",
+            get_fill_color=[244, 63, 94, 170],
+            pickable=True,
+        )
+        view_state = pdk.ViewState(latitude=-14.2350, longitude=-51.9253, zoom=3.5)
+        tooltip = {"text": "{uf}: {valor}"}
+        deck = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip, map_style="light")
+        st.pydeck_chart(deck, use_container_width=True)
 
-            layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=plot_df.assign(radius=rad),
-                get_position=["lon", "lat"],
-                get_radius="radius",
-                get_fill_color=[244, 63, 94, 160],  # vermelho
-                pickable=True,
-            )
-
-            view_state = pdk.ViewState(latitude=-14.2350, longitude=-51.9253, zoom=3.5)
-            tooltip = {"text": "{uf}: {valor}"}
-            deck = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip, map_style="dark_no_labels")
-            st.pydeck_chart(deck, use_container_width=True)
-
+    # Tabela por UF
     st.subheader("Tabela agregada por UF")
     st.dataframe(grupo.sort_values("valor", ascending=False), use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
-# Seção: Estoques estaduais (links oficiais/Google)
+# Seção: Estoques estaduais (links)
 # -----------------------------------------------------------------------------
 def pagina_links_estaduais():
     st.header("Acesse páginas/oficiais e pesquise por hemocentros do seu estado.")
@@ -376,18 +350,16 @@ def pagina_links_estaduais():
     rows = []
     for uf in ufs:
         link = base_link.format(UF=uf)
-        md = f"[Abrir]({link})"
-        rows.append({"UF": uf, "Link": md})
+        rows.append({"UF": uf, "Link": f"[Abrir]({link})"})
     df_links = pd.DataFrame(rows)
     st.dataframe(df_links, use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
-# Seção: Cadastro de doador (simples, local)
+# Seção: Cadastro de doador (simples/local)
 # -----------------------------------------------------------------------------
 def pagina_cadastro():
     st.header("Cadastrar doador (opcional)")
-
     with st.form("form_doador", clear_on_submit=True):
         c1, c2, c3 = st.columns([2, 2, 1])
         nome = c1.text_input("Nome completo")
@@ -406,7 +378,6 @@ def pagina_cadastro():
         if not (nome and email and consent):
             st.warning("Preencha **Nome**, **E-mail** e marque o consentimento.")
         else:
-            # No futuro: salvar em planilha/DB. Aqui mostramos um recibo simples.
             st.success("Cadastro salvo localmente (exemplo).")
             st.json({"nome": nome, "email": email, "telefone": tel, "uf": uf, "cidade": cidade, "tipo": tipo})
 
@@ -420,20 +391,20 @@ def pagina_sobre():
         textwrap.dedent(
             """
             **VisioData** — fontes oficiais e dados agregados, prontos para apresentação.
-            
-            - **ANVISA (nacional)**: leia o CSV público do projeto Hemoprod, gere KPIs e mapa por UF.
+
+            - **ANVISA (nacional)**: leia o CSV público do Hemoprod, gere KPIs e mapa por UF.
             - **Estoques estaduais**: atalhos para pesquisa de hemocentros por estado.
-            - **Cadastrar doador**: formulário simples (exemplo local) para futuras integrações.
-            
-            **Observação:** alguns CSVs da ANVISA variam de separador e codificação.  
-            O carregamento “robusto” tenta múltiplas estratégias (detecção de separador, `on_bad_lines='skip'`, etc.).
+            - **Cadastrar doador**: formulário simples (exemplo local).
+
+            O leitor de CSV é robusto (detecta separador e ignora linhas ruins),
+            evitando a falha do parâmetro `low_memory`+`engine='python'`.
             """
         )
     )
 
 
 # -----------------------------------------------------------------------------
-# Layout principal – barra lateral e roteamento
+# Roteamento (barra lateral)
 # -----------------------------------------------------------------------------
 st.sidebar.subheader("Navegação")
 secao = st.sidebar.radio(
@@ -465,3 +436,4 @@ elif secao == "Cadastrar doador":
     pagina_cadastro()
 else:
     pagina_sobre()
+
